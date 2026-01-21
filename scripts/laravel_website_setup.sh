@@ -14,6 +14,12 @@ INSTALL_SSL=""
 INSTALL_REDIS=""
 INSTALL_SUPERVISOR=""
 INSTALL_MYSQL=""
+USE_EXTERNAL_DB=""
+EXTERNAL_DB_HOST=""
+EXTERNAL_DB_PORT=""
+EXTERNAL_DB_NAME=""
+EXTERNAL_DB_USER=""
+EXTERNAL_DB_PASSWORD=""
 WEB_ROOT=""
 NGINX_AVAIL="/etc/nginx/sites-available"
 NGINX_ENABLED="/etc/nginx/sites-enabled"
@@ -103,6 +109,57 @@ generate_password() {
 }
 
 # ---------------------------------
+# External Database Functions
+# ---------------------------------
+collect_external_db_details() {
+    echo
+    echo "=== External Database Configuration ==="
+    read -rp "Enter database host (e.g., mydb.cluster-xyz.us-east-1.rds.amazonaws.com): " EXTERNAL_DB_HOST
+    read -rp "Enter database port (default 3306): " EXTERNAL_DB_PORT
+    EXTERNAL_DB_PORT=${EXTERNAL_DB_PORT:-3306}
+    read -rp "Enter database name: " EXTERNAL_DB_NAME
+    read -rp "Enter database username: " EXTERNAL_DB_USER
+    read -rsp "Enter database password: " EXTERNAL_DB_PASSWORD
+    echo
+    echo
+    
+    if test_external_db_connection; then
+        log_success "External database connection verified"
+        DB_NAME="$EXTERNAL_DB_NAME"
+        DB_USER="$EXTERNAL_DB_USER"
+        DB_PASSWORD="$EXTERNAL_DB_PASSWORD"
+    else
+        log_error "Couldn't connect to DB from this server."
+        read -rp "Continue without DB? (yes/no): " CONTINUE_WITHOUT_DB
+        if [ "$CONTINUE_WITHOUT_DB" != "yes" ]; then
+            echo "Setup aborted by user."
+            exit 1
+        else
+            log_info "Continuing setup without database configuration"
+            USE_EXTERNAL_DB="no"
+        fi
+    fi
+}
+
+test_external_db_connection() {
+    log_info "Testing external database connection..."
+    
+    # Install mysql client if not present
+    if ! command -v mysql >/dev/null 2>&1; then
+        log_info "Installing MySQL client for connection testing..."
+        apt update >/dev/null 2>&1
+        apt install -y mysql-client-core-8.0 >/dev/null 2>&1
+    fi
+    
+    # Test connection
+    if mysql -h "$EXTERNAL_DB_HOST" -P "$EXTERNAL_DB_PORT" -u "$EXTERNAL_DB_USER" -p"$EXTERNAL_DB_PASSWORD" -e "SELECT 1;" >/dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# ---------------------------------
 # Input Collection
 # ---------------------------------
 collect_inputs() {
@@ -119,6 +176,14 @@ collect_inputs() {
     PHP_PKG="php$PHP_VERSION"
     
     read -rp "Install MySQL database server? (yes/no): " INSTALL_MYSQL
+    
+    if [ "$INSTALL_MYSQL" != "yes" ]; then
+        read -rp "Are you using an external database like RDS or other? (yes/no): " USE_EXTERNAL_DB
+        if [ "$USE_EXTERNAL_DB" = "yes" ]; then
+            collect_external_db_details
+        fi
+    fi
+    
     read -rp "Install Redis for caching/sessions? (yes/no): " INSTALL_REDIS
     read -rp "Install Supervisor for queue workers? (yes/no): " INSTALL_SUPERVISOR
     read -rp "Install SSL certificate? (yes/no): " INSTALL_SSL
@@ -133,6 +198,9 @@ collect_inputs() {
     echo "Web Root     : $WEB_ROOT"
     echo "PHP Version  : $PHP_PKG"
     echo "MySQL        : $INSTALL_MYSQL"
+    if [ "$USE_EXTERNAL_DB" = "yes" ]; then
+        echo "External DB  : $EXTERNAL_DB_HOST:$EXTERNAL_DB_PORT/$EXTERNAL_DB_NAME"
+    fi
     echo "Redis        : $INSTALL_REDIS"
     echo "Supervisor   : $INSTALL_SUPERVISOR"
     echo "SSL          : $INSTALL_SSL"
@@ -166,7 +234,7 @@ install_nginx() {
     fi
     
     log_info "Installing Nginx..."
-    if apt install -y nginx >/dev/null 2>&1; then
+    if apt install nginx -y >/dev/null 2>&1; then
         systemctl enable nginx >/dev/null 2>&1 || { log_error "Failed to enable Nginx"; return 1; }
         systemctl start nginx >/dev/null 2>&1 || { log_error "Failed to start Nginx"; return 1; }
         log_success "Nginx installed and started"
@@ -185,7 +253,7 @@ install_php() {
     log_info "Installing PHP $PHP_PKG with Laravel extensions..."
     
     # Add PHP repository
-    if ! apt install -y software-properties-common >/dev/null 2>&1; then
+    if ! apt install software-properties-common -y >/dev/null 2>&1; then
         log_error "Failed to install software-properties-common"
         return 1
     fi
@@ -238,7 +306,7 @@ install_composer() {
     
     log_info "Installing Composer..."
     
-    if apt install -y composer >/dev/null 2>&1; then
+    if apt install composer -y >/dev/null 2>&1; then
         log_success "Composer installed: $(composer --version 2>/dev/null | head -1)"
     else
         log_error "Failed to install Composer"
@@ -254,7 +322,7 @@ install_nodejs() {
     
     log_info "Installing Node.js and npm..."
     
-    if apt install -y nodejs npm >/dev/null 2>&1; then
+    if apt install nodejs npm -y >/dev/null 2>&1; then
         log_success "Node.js installed: $(node --version 2>/dev/null)"
         log_success "npm installed: $(npm --version 2>/dev/null)"
     else
@@ -295,26 +363,6 @@ remove_mysql() {
     fi
 }
 
-create_credentials_file() {
-    cat > "/root/${APP_NAME}_mysql_credentials.txt" << EOF
-MySQL Root Password: ${MYSQL_ROOT_PASSWORD:-"N/A"}
-Database Name: $DB_NAME
-Database User: $DB_USER
-Database Password: $DB_PASSWORD
-
-Connection String for Laravel .env:
-DB_CONNECTION=mysql
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_DATABASE=$DB_NAME
-DB_USERNAME=$DB_USER
-DB_PASSWORD=$DB_PASSWORD
-EOF
-    
-    chmod 600 "/root/${APP_NAME}_mysql_credentials.txt"
-    log_success "Credentials saved to /root/${APP_NAME}_mysql_credentials.txt"
-}
-
 create_database_with_auth() {
     local mysql_cmd="$1"
     
@@ -323,7 +371,6 @@ create_database_with_auth() {
        $mysql_cmd -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';" 2>/dev/null && \
        $mysql_cmd -e "FLUSH PRIVILEGES;" 2>/dev/null; then
         
-        create_credentials_file
         log_success "Database '$DB_NAME' and user '$DB_USER' created successfully"
         return 0
     else
@@ -339,7 +386,7 @@ install_fresh_mysql() {
     debconf-set-selections <<< "mysql-server mysql-server/root_password password $MYSQL_ROOT_PASSWORD" 2>/dev/null
     debconf-set-selections <<< "mysql-server mysql-server/root_password_again password $MYSQL_ROOT_PASSWORD" 2>/dev/null
     
-    if apt install -y mysql-server >/dev/null 2>&1; then
+    if apt install mysql-server -y >/dev/null 2>&1; then
         systemctl enable mysql >/dev/null 2>&1 || { log_error "Failed to enable MySQL"; return 1; }
         systemctl start mysql >/dev/null 2>&1 || { log_error "Failed to start MySQL"; return 1; }
         
@@ -414,11 +461,17 @@ install_fresh_mysql() {
 }
 
 install_database() {
-    if [ "$INSTALL_MYSQL" != "yes" ]; then
-        log_info "MySQL installation skipped by user choice"
+    if [ "$INSTALL_MYSQL" != "yes" ] && [ "$USE_EXTERNAL_DB" != "yes" ]; then
+        log_info "Database installation skipped by user choice"
         return 0
     fi
     
+    if [ "$USE_EXTERNAL_DB" = "yes" ]; then
+        log_info "Using external database configuration"
+        return 0
+    fi
+    
+    # Local MySQL installation logic
     # Always generate database credentials with sanitized names
     local sanitized_name=$(echo "$APP_NAME" | tr '-' '_')
     DB_NAME="${sanitized_name}_db"
@@ -484,7 +537,7 @@ install_redis() {
     fi
     
     log_info "Installing Redis..."
-    if apt install -y redis-server >/dev/null 2>&1; then
+    if apt install redis-server -y >/dev/null 2>&1; then
         systemctl enable redis-server >/dev/null 2>&1 || { log_error "Failed to enable Redis"; return 1; }
         systemctl start redis-server >/dev/null 2>&1 || { log_error "Failed to start Redis"; return 1; }
         
@@ -510,7 +563,7 @@ install_supervisor() {
     fi
     
     log_info "Installing Supervisor..."
-    if apt install -y supervisor >/dev/null 2>&1; then
+    if apt install supervisor -y >/dev/null 2>&1; then
         systemctl enable supervisor >/dev/null 2>&1 || { log_error "Failed to enable Supervisor"; return 1; }
         systemctl start supervisor >/dev/null 2>&1 || { log_error "Failed to start Supervisor"; return 1; }
         
@@ -552,49 +605,209 @@ setup_webroot() {
     mkdir -p "$WEB_ROOT/public" 2>/dev/null
     mkdir -p "$WEB_ROOT/storage/logs" 2>/dev/null
     
-    # Create placeholder index file
+    # Create Coming Soon landing page
     cat > "$WEB_ROOT/public/index.php" << 'EOF'
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Laravel Setup Ready</title>
+    <title>Coming Soon!</title>
     <style>
-        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-        .container { max-width: 600px; margin: 0 auto; }
-        .status { color: #28a745; font-size: 24px; margin: 20px 0; }
-        .instructions { background: #f8f9fa; padding: 20px; border-radius: 5px; text-align: left; }
-        code { background: #e9ecef; padding: 2px 4px; border-radius: 3px; }
+        body { 
+            font-family: 'Arial', sans-serif; 
+            text-align: center; 
+            padding: 50px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container { 
+            max-width: 600px; 
+            margin: 0 auto;
+            background: rgba(255,255,255,0.1);
+            padding: 40px;
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+        }
+        .title { 
+            font-size: 48px; 
+            margin: 20px 0;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        .subtitle {
+            font-size: 18px;
+            margin: 20px 0;
+            opacity: 0.9;
+        }
+        .status { 
+            color: #4CAF50; 
+            font-size: 16px; 
+            margin: 30px 0;
+            background: rgba(255,255,255,0.2);
+            padding: 15px;
+            border-radius: 8px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Laravel Infrastructure Ready</h1>
-        <div class="status">✓ Server environment configured successfully</div>
-        
-        <div class="instructions">
-            <h3>Next Steps:</h3>
-            <ol>
-                <li>Deploy your Laravel application to: <code><?php echo __DIR__ . '/..'; ?></code></li>
-                <li>Run: <code>composer install</code></li>
-                <li>Configure: <code>.env</code> file</li>
-                <li>Run: <code>php artisan key:generate</code></li>
-                <li>Run: <code>php artisan migrate</code></li>
-                <li>Set permissions: <code>chown -R www-data:www-data storage bootstrap/cache</code></li>
-            </ol>
-            
-            <h3>Database Configuration:</h3>
-            <p>Database: <code><?php echo getenv('APP_NAME') ?: 'laravel'; ?>_db</code></p>
-            <p>Username: <code><?php echo getenv('APP_NAME') ?: 'laravel'; ?>_user</code></p>
-            <p>Password: <code>Check /root/<?php echo getenv('APP_NAME') ?: 'laravel'; ?>_mysql_credentials.txt</code></p>
-        </div>
+        <div class="title">Coming Soon!</div>
+        <div class="subtitle">We're working hard to bring you something amazing.</div>
+        <div class="status">✓ Server infrastructure is ready and configured</div>
     </div>
 </body>
 </html>
 EOF
     
+    # Create .env file if database is configured
+    if [ "$USE_EXTERNAL_DB" = "yes" ] || [ "$INSTALL_MYSQL" = "yes" ]; then
+        create_env_file
+    fi
+    
     chown -R www-data:www-data "$WEB_ROOT" 2>/dev/null
     chmod -R 755 "$WEB_ROOT" 2>/dev/null
     chmod -R 775 "$WEB_ROOT/storage" 2>/dev/null
+}
+
+create_env_file() {
+    log_info "Creating .env file with database configuration..."
+    
+    if [ "$USE_EXTERNAL_DB" = "yes" ]; then
+        # External database configuration
+        cat > "$WEB_ROOT/.env" << EOF
+APP_NAME=$APP_NAME
+APP_ENV=production
+APP_KEY=
+APP_DEBUG=false
+APP_URL=http://$(echo $DOMAIN_NAME | awk '{print $1}')
+
+LOG_CHANNEL=stack
+LOG_DEPRECATIONS_CHANNEL=null
+LOG_LEVEL=debug
+
+DB_CONNECTION=mysql
+DB_HOST=$EXTERNAL_DB_HOST
+DB_PORT=$EXTERNAL_DB_PORT
+DB_DATABASE=$EXTERNAL_DB_NAME
+DB_USERNAME=$EXTERNAL_DB_USER
+DB_PASSWORD=$EXTERNAL_DB_PASSWORD
+
+BROADCAST_DRIVER=log
+CACHE_DRIVER=file
+FILESYSTEM_DISK=local
+QUEUE_CONNECTION=sync
+SESSION_DRIVER=file
+SESSION_LIFETIME=120
+
+MEMCACHED_HOST=127.0.0.1
+
+REDIS_HOST=127.0.0.1
+REDIS_PASSWORD=null
+REDIS_PORT=6379
+
+MAIL_MAILER=smtp
+MAIL_HOST=mailpit
+MAIL_PORT=1025
+MAIL_USERNAME=null
+MAIL_PASSWORD=null
+MAIL_ENCRYPTION=null
+MAIL_FROM_ADDRESS="hello@example.com"
+MAIL_FROM_NAME="\${APP_NAME}"
+
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_DEFAULT_REGION=ap-south-1
+AWS_BUCKET=
+AWS_USE_PATH_STYLE_ENDPOINT=false
+
+PUSHER_APP_ID=
+PUSHER_APP_KEY=
+PUSHER_APP_SECRET=
+PUSHER_HOST=
+PUSHER_PORT=443
+PUSHER_SCHEME=https
+PUSHER_APP_CLUSTER=mt1
+
+VITE_APP_NAME="\${APP_NAME}"
+VITE_PUSHER_APP_KEY="\${PUSHER_APP_KEY}"
+VITE_PUSHER_HOST="\${PUSHER_HOST}"
+VITE_PUSHER_PORT="\${PUSHER_PORT}"
+VITE_PUSHER_SCHEME="\${PUSHER_SCHEME}"
+VITE_PUSHER_APP_CLUSTER="\${PUSHER_APP_CLUSTER}"
+EOF
+    else
+        # Local MySQL configuration
+        cat > "$WEB_ROOT/.env" << EOF
+APP_NAME=$APP_NAME
+APP_ENV=production
+APP_KEY=
+APP_DEBUG=false
+APP_URL=http://$(echo $DOMAIN_NAME | awk '{print $1}')
+
+LOG_CHANNEL=stack
+LOG_DEPRECATIONS_CHANNEL=null
+LOG_LEVEL=debug
+
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=$DB_NAME
+DB_USERNAME=$DB_USER
+DB_PASSWORD=$DB_PASSWORD
+
+BROADCAST_DRIVER=log
+CACHE_DRIVER=file
+FILESYSTEM_DISK=local
+QUEUE_CONNECTION=sync
+SESSION_DRIVER=file
+SESSION_LIFETIME=120
+
+MEMCACHED_HOST=127.0.0.1
+
+REDIS_HOST=127.0.0.1
+REDIS_PASSWORD=null
+REDIS_PORT=6379
+
+MAIL_MAILER=smtp
+MAIL_HOST=mailpit
+MAIL_PORT=1025
+MAIL_USERNAME=null
+MAIL_PASSWORD=null
+MAIL_ENCRYPTION=null
+MAIL_FROM_ADDRESS="hello@example.com"
+MAIL_FROM_NAME="\${APP_NAME}"
+
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_DEFAULT_REGION=us-east-1
+AWS_BUCKET=
+AWS_USE_PATH_STYLE_ENDPOINT=false
+
+PUSHER_APP_ID=
+PUSHER_APP_KEY=
+PUSHER_APP_SECRET=
+PUSHER_HOST=
+PUSHER_PORT=443
+PUSHER_SCHEME=https
+PUSHER_APP_CLUSTER=mt1
+
+VITE_APP_NAME="\${APP_NAME}"
+VITE_PUSHER_APP_KEY="\${PUSHER_APP_KEY}"
+VITE_PUSHER_HOST="\${PUSHER_HOST}"
+VITE_PUSHER_PORT="\${PUSHER_PORT}"
+VITE_PUSHER_SCHEME="\${PUSHER_SCHEME}"
+VITE_PUSHER_APP_CLUSTER="\${PUSHER_APP_CLUSTER}"
+EOF
+    fi
+    
+    chmod 644 "$WEB_ROOT/.env"
+    chown www-data:www-data "$WEB_ROOT/.env"
+    log_success ".env file created with database configuration"
 }
 
 # ---------------------------------
@@ -802,7 +1015,7 @@ setup_ssl() {
         fi
         
         log_info "Installing SSL certificate..."
-        apt install -y certbot python3-certbot-nginx >/dev/null 2>&1
+        apt install certbot python3-certbot-nginx -y >/dev/null 2>&1
         
         if certbot --nginx -d $(echo $DOMAIN_NAME | tr ' ' ',') --non-interactive --agree-tos --email admin@$(echo $DOMAIN_NAME | awk '{print $1}') >/dev/null 2>&1; then
             systemctl reload nginx >/dev/null 2>&1
@@ -826,9 +1039,15 @@ show_instructions() {
     echo "  Web Root: $WEB_ROOT"
     echo "  PHP Version: $PHP_VERSION"
     if [ "$INSTALL_MYSQL" = "yes" ] && [ -n "$DB_NAME" ]; then
-        echo "  Database: $DB_NAME"
+        echo "  Database: $DB_NAME (Local MySQL)"
         echo "  DB User: $DB_USER"
-        echo "  Credentials: /root/${APP_NAME}_mysql_credentials.txt"
+        echo "  .env file: $WEB_ROOT/.env (configured with local MySQL)"
+    elif [ "$USE_EXTERNAL_DB" = "yes" ]; then
+        echo "  Database: $EXTERNAL_DB_NAME (External: $EXTERNAL_DB_HOST:$EXTERNAL_DB_PORT)"
+        echo "  DB User: $EXTERNAL_DB_USER"
+        echo "  .env file: $WEB_ROOT/.env (configured with external DB)"
+    else
+        echo "  Database: Not configured"
     fi
     echo
     echo "Website Test Results:"
@@ -838,14 +1057,24 @@ show_instructions() {
     echo "  1. Upload/clone your Laravel project to: $WEB_ROOT"
     echo "  2. cd $WEB_ROOT"
     echo "  3. composer install --optimize-autoloader --no-dev"
-    echo "  4. cp .env.example .env"
-    echo "  5. php artisan key:generate"
-    echo "  6. Configure database in .env file"
-    echo "  7. php artisan migrate"
-    echo "  8. php artisan config:cache"
-    echo "  9. php artisan route:cache"
-    echo "  10. php artisan view:cache"
-    echo "  11. chown -R www-data:www-data storage bootstrap/cache"
+    if [ "$USE_EXTERNAL_DB" = "yes" ] || [ "$INSTALL_MYSQL" = "yes" ]; then
+        echo "  4. .env file already configured with database settings"
+        echo "  5. php artisan key:generate"
+        echo "  6. php artisan migrate"
+        echo "  7. php artisan config:cache"
+        echo "  8. php artisan route:cache"
+        echo "  9. php artisan view:cache"
+        echo "  10. chown -R www-data:www-data storage bootstrap/cache"
+    else
+        echo "  4. cp .env.example .env (configure database manually)"
+        echo "  5. php artisan key:generate"
+        echo "  6. Configure database in .env file"
+        echo "  7. php artisan migrate"
+        echo "  8. php artisan config:cache"
+        echo "  9. php artisan route:cache"
+        echo "  10. php artisan view:cache"
+        echo "  11. chown -R www-data:www-data storage bootstrap/cache"
+    fi
     echo
     if [ "$INSTALL_SUPERVISOR" = "yes" ]; then
         echo "Queue Worker Setup:"

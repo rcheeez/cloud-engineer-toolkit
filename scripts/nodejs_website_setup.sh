@@ -302,7 +302,7 @@ create_database_with_auth() {
     local mysql_cmd="$1"
     
     if $mysql_cmd -e "CREATE DATABASE IF NOT EXISTS $DB_NAME;" 2>/dev/null && \
-       $mysql_cmd -e "CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASSWORD';" 2>/dev/null && \
+       $mysql_cmd -e "CREATE USER IF NOT EXISTS '$DB_USER'@'%' IDENTIFIED BY '$DB_PASSWORD';" 2>/dev/null && \
        $mysql_cmd -e "GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';" 2>/dev/null && \
        $mysql_cmd -e "FLUSH PRIVILEGES;" 2>/dev/null; then
         
