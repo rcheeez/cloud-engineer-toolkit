@@ -115,10 +115,20 @@ install_nginx() {
 
 install_php() {
     if [ "$NEED_PHP" = "yes" ]; then
+        log_info "Adding PHP repository..."
+        apt install -y software-properties-common >/dev/null 2>&1
+        add-apt-repository ppa:ondrej/php -y >/dev/null 2>&1
+        apt update >/dev/null 2>&1
+        
         log_info "Installing PHP $PHP_PKG (CLI + FPM)..."
-        apt install -y "$PHP_PKG" "$PHP_PKG-cli" "$PHP_PKG-fpm" >/dev/null 2>&1
-        systemctl enable "$PHP_PKG-fpm" >/dev/null 2>&1
-        systemctl start "$PHP_PKG-fpm" >/dev/null 2>&1
+        if apt install -y "$PHP_PKG" "$PHP_PKG-cli" "$PHP_PKG-fpm" >/dev/null 2>&1; then
+            systemctl enable "$PHP_PKG-fpm" >/dev/null 2>&1
+            systemctl start "$PHP_PKG-fpm" >/dev/null 2>&1
+            log_info "PHP $PHP_VERSION installed successfully"
+        else
+            log_error "Failed to install PHP $PHP_VERSION"
+            exit 1
+        fi
     fi
 }
 
