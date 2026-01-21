@@ -3,7 +3,9 @@
 # Static Website Setup Tool - Enhanced Version
 # Modular, DNS-aware, with inline config generation
 
+# Error handling
 set -e
+trap 'log_error "Script failed at line $LINENO. Exit code: $?"' ERR
 
 # Global variables
 APP_NAME=""
@@ -103,32 +105,67 @@ collect_inputs() {
 # ---------------------------------
 update_system() {
     log_info "Updating system packages..."
-    apt update -y >/dev/null 2>&1 && apt upgrade -y >/dev/null 2>&1
+    if ! apt update -y 2>/dev/null; then
+        log_error "Failed to update package list"
+        exit 1
+    fi
+    if ! apt upgrade -y 2>/dev/null; then
+        log_error "Failed to upgrade system packages"
+        exit 1
+    fi
 }
 
 install_nginx() {
     log_info "Installing Nginx..."
-    apt install -y nginx >/dev/null 2>&1
-    systemctl enable nginx >/dev/null 2>&1
-    systemctl start nginx >/dev/null 2>&1
+    if ! apt install -y nginx 2>/dev/null; then
+        log_error "Failed to install Nginx"
+        exit 1
+    fi
+    if ! systemctl enable nginx 2>/dev/null; then
+        log_error "Failed to enable Nginx service"
+        exit 1
+    fi
+    if ! systemctl start nginx 2>/dev/null; then
+        log_error "Failed to start Nginx service"
+        exit 1
+    fi
 }
 
 install_php() {
     if [ "$NEED_PHP" = "yes" ]; then
         log_info "Adding PHP repository..."
-        apt install -y software-properties-common >/dev/null 2>&1
-        add-apt-repository ppa:ondrej/php -y >/dev/null 2>&1
-        apt update >/dev/null 2>&1
-        
-        log_info "Installing PHP $PHP_PKG (CLI + FPM)..."
-        if apt install -y "$PHP_PKG" "$PHP_PKG-cli" "$PHP_PKG-fpm" >/dev/null 2>&1; then
-            systemctl enable "$PHP_PKG-fpm" >/dev/null 2>&1
-            systemctl start "$PHP_PKG-fpm" >/dev/null 2>&1
-            log_info "PHP $PHP_VERSION installed successfully"
-        else
-            log_error "Failed to install PHP $PHP_VERSION"
+        if ! apt install -y software-properties-common 2>/dev/null; then
+            log_error "Failed to install software-properties-common"
             exit 1
         fi
+        
+        if ! add-apt-repository ppa:ondrej/php -y 2>/dev/null; then
+            log_error "Failed to add PHP repository (ppa:ondrej/php)"
+            exit 1
+        fi
+        
+        if ! apt update 2>/dev/null; then
+            log_error "Failed to update package list after adding PHP repository"
+            exit 1
+        fi
+        
+        log_info "Installing PHP $PHP_PKG (CLI + FPM)..."
+        if ! apt install -y "$PHP_PKG" "$PHP_PKG-cli" "$PHP_PKG-fpm" 2>/dev/null; then
+            log_error "Failed to install PHP $PHP_VERSION packages"
+            exit 1
+        fi
+        
+        if ! systemctl enable "$PHP_PKG-fpm" 2>/dev/null; then
+            log_error "Failed to enable PHP-FPM service"
+            exit 1
+        fi
+        
+        if ! systemctl start "$PHP_PKG-fpm" 2>/dev/null; then
+            log_error "Failed to start PHP-FPM service"
+            exit 1
+        fi
+        
+        log_info "PHP $PHP_VERSION installed successfully"
     fi
 }
 
