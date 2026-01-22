@@ -104,14 +104,24 @@ collect_inputs() {
 # System Setup
 # ---------------------------------
 update_system() {
-    log_info "Updating system packages..."
+    log_info "Checking for system package updates..."
     if ! apt update -y 2>/dev/null; then
         log_error "Failed to update package list"
         exit 1
     fi
-    if ! apt upgrade -y 2>/dev/null; then
-        log_error "Failed to upgrade system packages"
-        exit 1
+    
+    # Check if there are any upgradable packages
+    local upgradable_count=$(apt list --upgradable 2>/dev/null | grep -c "upgradable" || echo "0")
+    
+    if [ "$upgradable_count" -gt 0 ]; then
+        log_info "Found $upgradable_count upgradable packages. Upgrading..."
+        if ! apt upgrade -y 2>/dev/null; then
+            log_error "Failed to upgrade system packages"
+            exit 1
+        fi
+        log_info "System packages upgraded successfully"
+    else
+        log_info "No package updates available. System is up to date."
     fi
 }
 

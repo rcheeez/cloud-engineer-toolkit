@@ -10,6 +10,7 @@ APP_NAME=""
 DOMAIN_NAME=""
 PHP_VERSION=""
 PHP_PKG=""
+NODE_VERSION=""
 INSTALL_SSL=""
 INSTALL_REDIS=""
 INSTALL_SUPERVISOR=""
@@ -87,6 +88,13 @@ check_root() {
 validate_php_version() {
     if [[ ! "$PHP_VERSION" =~ ^8\.[1-4]$ ]]; then
         log_error "Unsupported PHP version: $PHP_VERSION (Laravel requires 8.1+)"
+        exit 1
+    fi
+}
+
+validate_node_version() {
+    if [[ ! "$NODE_VERSION" =~ ^(18|20|22)$ ]]; then
+        log_error "Unsupported Node.js version: $NODE_VERSION (Laravel requires 18, 20, or 22)"
         exit 1
     fi
 }
@@ -175,6 +183,9 @@ collect_inputs() {
     validate_php_version
     PHP_PKG="php$PHP_VERSION"
     
+    read -rp "Enter Node.js version (18 / 20 / 22): " NODE_VERSION
+    validate_node_version
+    
     read -rp "Install MySQL database server? (yes/no): " INSTALL_MYSQL
     
     if [ "$INSTALL_MYSQL" != "yes" ]; then
@@ -197,6 +208,7 @@ collect_inputs() {
     echo "Domain       : $DOMAIN_NAME"
     echo "Web Root     : $WEB_ROOT"
     echo "PHP Version  : $PHP_PKG"
+    echo "Node.js      : v$NODE_VERSION"
     echo "MySQL        : $INSTALL_MYSQL"
     if [ "$USE_EXTERNAL_DB" = "yes" ]; then
         echo "External DB  : $EXTERNAL_DB_HOST:$EXTERNAL_DB_PORT/$EXTERNAL_DB_NAME"
@@ -218,12 +230,25 @@ collect_inputs() {
 # System Setup
 # ---------------------------------
 update_system() {
-    log_info "Updating system packages..."
-    if apt update -y >/dev/null 2>&1 && apt upgrade -y >/dev/null 2>&1; then
-        log_success "System packages updated"
-    else
-        log_error "Failed to update system packages"
+    log_info "Checking for system package updates..."
+    if ! apt update -y >/dev/null 2>&1; then
+        log_error "Failed to update package list"
         return 1
+    fi
+    
+    # Check if there are any upgradable packages
+    local upgradable_count=$(apt list --upgradable 2>/dev/null | grep -c "upgradable" || echo "0")
+    
+    if [ "$upgradable_count" -gt 0 ]; then
+        log_info "Found $upgradable_count upgradable packages. Upgrading..."
+        if apt upgrade -y >/dev/null 2>&1; then
+            log_success "System packages updated"
+        else
+            log_error "Failed to upgrade system packages"
+            return 1
+        fi
+    else
+        log_success "No package updates available. System is up to date."
     fi
 }
 
@@ -306,8 +331,19 @@ install_composer() {
     
     log_info "Installing Composer..."
     
-    if apt install composer -y >/dev/null 2>&1; then
+    # First try installing from repository with timeout
+    if timeout 30 apt install -y composer >/dev/null 2>&1; then
         log_success "Composer installed: $(composer --version 2>/dev/null | head -1)"
+        return 0
+    fi
+    
+    # If repository installation fails, install manually
+    log_info "Repository installation failed, installing Composer manually..."
+    
+    # Download and install Composer manually
+    if curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer >/dev/null 2>&1; then
+        chmod +x /usr/local/bin/composer
+        log_success "Composer installed manually: $(composer --version 2>/dev/null | head -1)"
     else
         log_error "Failed to install Composer"
         return 1
@@ -315,18 +351,27 @@ install_composer() {
 }
 
 install_nodejs() {
-    if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
-        log_skip "Node.js and npm"
-        return 0
+    if command -v node >/dev/null 2>&1; then
+        local current_version=$(node --version | cut -d'v' -f2 | cut -d'.' -f1)
+        if [ "$current_version" = "$NODE_VERSION" ]; then
+            log_skip "Node.js v$NODE_VERSION"
+            return 0
+        fi
     fi
     
-    log_info "Installing Node.js and npm..."
+    log_info "Installing Node.js v$NODE_VERSION..."
     
-    if apt install nodejs npm -y >/dev/null 2>&1; then
-        log_success "Node.js installed: $(node --version 2>/dev/null)"
-        log_success "npm installed: $(npm --version 2>/dev/null)"
+    # Install NodeSource repository
+    if curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - >/dev/null 2>&1; then
+        if apt install -y nodejs >/dev/null 2>&1; then
+            log_success "Node.js installed: $(node --version 2>/dev/null)"
+            log_success "npm installed: $(npm --version 2>/dev/null)"
+        else
+            log_error "Failed to install Node.js"
+            return 1
+        fi
     else
-        log_error "Failed to install Node.js and npm"
+        log_error "Failed to add Node.js repository"
         return 1
     fi
 }
